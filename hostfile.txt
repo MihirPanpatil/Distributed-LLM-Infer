@@ -1,0 +1,1 @@
+LAPTOP-PTR322VG slots=1 type=NVIDIA
