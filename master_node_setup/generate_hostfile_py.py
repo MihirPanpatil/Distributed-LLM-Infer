@@ -161,21 +161,28 @@ def main():
 
     hostfile_content = []
     failed_nodes = []
-    master_info = None
+    # Only include master node if explicitly requested
     if args.include_master:
+        print("\n--- Detecting resources on master node ---")
         master_info = detect_local_gpus()
         if master_info:
-            hostfile_content.append(master_info)
+            print(f"Master node info: {master_info}")
+            if "slots=0" in master_info and not args.force_include:
+                print("Skipping master node - no resources detected (use --force-include to override)")
+            else:
+                hostfile_content.append(master_info)
         else:
-            print("Master node specified to be included, but no GPUs detected locally.")
+            print("Warning: Could not detect resources on master node")
 
     # Prepare command for worker nodes
     # Ensure the detect script is executable (needs to be run on workers)
     # The command assumes 'bash' is available on the worker nodes.
     command_to_run = f"bash {args.script_path}"
 
+    # Worker node detection
+    print("\n=== Worker Node Detection ===")
     for node in args.nodes:
-        print(f"\n--- Querying node: {node} ---")
+        print(f"\n--- Querying worker node: {node} ---")
         gpu_info, err = execute_remote_command(
             hostname=node,
             port=args.ssh_port,
@@ -184,23 +191,39 @@ def main():
             key_filename=ssh_key,
             password=ssh_password
         )
+        
+        # Display raw detection output
+        if gpu_info:
+            print(f"Raw worker detection output: {gpu_info}")
 
         if gpu_info:
             print(f"Detected info for {node}: {gpu_info}")
-            # Parse GPU and CPU slots
+            # Parse all values from the output
+            hostname = gpu_info.split()[0]
             gpu_slots = 0
             cpu_slots = 0
-            if "gpu_slots=" in gpu_info:
-                gpu_slots = int(gpu_info.split("gpu_slots=")[1].split()[0])
-            if "cpu_slots=" in gpu_info:
-                cpu_slots = int(gpu_info.split("cpu_slots=")[1].split()[0])
+            gpu_type = "None"
             
-            # Use GPU slots if available, otherwise CPU slots
-            slots = gpu_slots if gpu_slots > 0 else cpu_slots
-            if slots > 0:
-                hostfile_content.append(f"{node} slots={slots}")
+            # Extract all key-value pairs
+            for part in gpu_info.split():
+                if "=" in part:
+                    key, value = part.split("=", 1)
+                    if key == "gpu_slots":
+                        gpu_slots = int(value)
+                    elif key == "cpu_slots":
+                        cpu_slots = int(value)
+                    elif key == "gpu_type":
+                        gpu_type = value
+            
+            # Format hostfile entry
+            if gpu_slots > 0:
+                # If GPUs available, use them first
+                hostfile_content.append(f"{hostname} slots={gpu_slots},{cpu_slots} # {gpu_type}")
+            elif cpu_slots > 0:
+                # If only CPUs available, use them
+                hostfile_content.append(f"{hostname} slots={cpu_slots} # CPU-only")
             else:
-                print(f"Warning: No usable slots found for {node}")
+                print(f"Warning: No usable resources found for {node}")
                 failed_nodes.append(node)
         else:
             print(f"Warning: Failed to get GPU info from {node}. Error: {err}")

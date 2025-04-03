@@ -54,11 +54,28 @@ if [ -z "$SCRIPT_PATH" ]; then
     SCRIPT_PATH="~/worker_node_setup/detect_gpus.sh"
 fi
 
+# Expand ~ in script path to absolute path
+EXPANDED_SCRIPT_PATH=$(ssh -i ~/.ssh/id_rsa mihir@$NODES "echo $SCRIPT_PATH")
+
 # Copy script to each worker
 for node in $NODES; do
-    echo "Copying detect_gpus.sh to $node:${SCRIPT_PATH%/*}"
-    scp -i ~/.ssh/id_rsa ../worker_node_setup/detect_gpus.sh mihir@$node:${SCRIPT_PATH%/*}/
-    ssh -i ~/.ssh/id_rsa mihir@$node "chmod +x $SCRIPT_PATH"
+    echo "Copying detect_gpus.sh to $node:$EXPANDED_SCRIPT_PATH"
+    # Create directory if it doesn't exist
+    ssh -i ~/.ssh/id_rsa mihir@$node "mkdir -p ${EXPANDED_SCRIPT_PATH%/*}"
+    # Copy file
+    scp -i ~/.ssh/id_rsa ../worker_node_setup/detect_gpus.sh mihir@$node:"$EXPANDED_SCRIPT_PATH"
+    # Set permissions with error checking
+    if ! ssh -i ~/.ssh/id_rsa mihir@$node "chmod +x $EXPANDED_SCRIPT_PATH"; then
+        echo "Error: Failed to set execute permissions on $EXPANDED_SCRIPT_PATH"
+        exit 1
+    fi
+    echo "Successfully set execute permissions on $EXPANDED_SCRIPT_PATH"
+    # Verify copy and permissions
+    if ! ssh -i ~/.ssh/id_rsa mihir@$node "[ -x $EXPANDED_SCRIPT_PATH ]"; then
+        echo "Error: File not found or not executable at $EXPANDED_SCRIPT_PATH"
+        exit 1
+    fi
+    echo "Successfully verified detect_gpus.sh is executable on $node"
 done
 
 # 3. Generate hostfile using the Python script
