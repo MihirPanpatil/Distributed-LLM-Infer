@@ -9,7 +9,7 @@ import socket
 # --- Configuration ---
 # List of worker node hostnames or IP addresses
 # Replace these placeholders with the actual hostnames or IPs of your worker nodes.
-DEFAULT_NODES = ["worker-node-1-ip", "worker-node-2-ip"]
+DEFAULT_NODES = ["10.255.255.254"]
 
 # Path to the detect_gpus.sh script on the worker nodes
 # IMPORTANT: This should be the *absolute path* or path relative to the user's
@@ -131,11 +131,12 @@ def detect_local_gpus():
         gpu_count = 0
         gpu_type = "None"
 
+    cpu_cores = os.cpu_count()
     if gpu_count > 0:
-        return f"{hostname} slots={gpu_count} type={gpu_type}"
+        return f"{hostname} gpu_slots={gpu_count} gpu_type={gpu_type} cpu_slots={cpu_cores}"
     else:
-        print("Could not detect usable GPUs on the master node.")
-        return None
+        print(f"No GPUs detected, using {cpu_cores} CPU cores")
+        return f"{hostname} gpu_slots=0 gpu_type=None cpu_slots={cpu_cores}"
 
 def main():
     args = parse_arguments()
@@ -186,12 +187,21 @@ def main():
 
         if gpu_info:
             print(f"Detected info for {node}: {gpu_info}")
-            # Basic validation: check if output contains "slots="
-            if "slots=" in gpu_info:
-                 hostfile_content.append(gpu_info)
+            # Parse GPU and CPU slots
+            gpu_slots = 0
+            cpu_slots = 0
+            if "gpu_slots=" in gpu_info:
+                gpu_slots = int(gpu_info.split("gpu_slots=")[1].split()[0])
+            if "cpu_slots=" in gpu_info:
+                cpu_slots = int(gpu_info.split("cpu_slots=")[1].split()[0])
+            
+            # Use GPU slots if available, otherwise CPU slots
+            slots = gpu_slots if gpu_slots > 0 else cpu_slots
+            if slots > 0:
+                hostfile_content.append(f"{node} slots={slots}")
             else:
-                 print(f"Warning: Output from {node} ('{gpu_info}') doesn't contain 'slots='. Skipping.")
-                 failed_nodes.append(node)
+                print(f"Warning: No usable slots found for {node}")
+                failed_nodes.append(node)
         else:
             print(f"Warning: Failed to get GPU info from {node}. Error: {err}")
             failed_nodes.append(node)

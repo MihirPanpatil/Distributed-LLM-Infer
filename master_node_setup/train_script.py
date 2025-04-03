@@ -112,7 +112,20 @@ def main():
 
     # Ensure local_rank is correctly set for subsequent operations
     local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank)) # Get rank from env if available
-    torch.cuda.set_device(local_rank) # Set the current device for this process
+    
+    # Handle device assignment
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        print(f"[Rank {local_rank}] Using GPU {torch.cuda.get_device_name()}")
+    else:
+        device = torch.device("cpu")
+        cpu_cores = os.cpu_count()
+        print(f"[Rank {local_rank}] No GPU available, using {cpu_cores} CPU cores")
+        
+        # Adjust batch size for CPU if needed
+        if hasattr(args, 'micro_batch_size'):
+            args.micro_batch_size = max(1, args.micro_batch_size // 4)  # Reduce batch size for CPU
 
     print(f"[Rank {local_rank}] DeepSpeed distributed initialized.")
     print(f"[Rank {local_rank}] DeepSpeed Config Path: {args.deepspeed_config}")

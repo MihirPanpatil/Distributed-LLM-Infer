@@ -35,19 +35,31 @@ else
     fi
 fi
 
-# 2. Remove old bash script if it exists
-echo "[Step 2/4] Cleaning up old scripts..."
-if [ -f "$OLD_HOSTFILE_GEN_SCRIPT" ]; then
-    echo "Removing old script: $OLD_HOSTFILE_GEN_SCRIPT"
-    rm "$OLD_HOSTFILE_GEN_SCRIPT"
-    if [ $? -eq 0 ]; then
-        echo "Old script removed."
-    else
-        echo "Warning: Failed to remove $OLD_HOSTFILE_GEN_SCRIPT."
-    fi
-else
-    echo "Old script $OLD_HOSTFILE_GEN_SCRIPT not found, skipping removal."
+# 2. Verify and copy detection script to workers
+echo "[Step 2/4] Verifying and copying detection script..."
+if [ ! -f "../worker_node_setup/detect_gpus.sh" ]; then
+    echo "Error: detect_gpus.sh not found in worker_node_setup directory"
+    exit 1
 fi
+
+# Get nodes from arguments
+NODES=$(echo "$@" | grep -oP -- '--nodes\s+\K\S+')
+if [ -z "$NODES" ]; then
+    NODES="10.255.255.254" # Default node
+fi
+
+# Get script path from arguments
+SCRIPT_PATH=$(echo "$@" | grep -oP -- '--script-path\s+\K\S+')
+if [ -z "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="~/worker_node_setup/detect_gpus.sh"
+fi
+
+# Copy script to each worker
+for node in $NODES; do
+    echo "Copying detect_gpus.sh to $node:${SCRIPT_PATH%/*}"
+    scp -i ~/.ssh/id_rsa ../worker_node_setup/detect_gpus.sh mihir@$node:${SCRIPT_PATH%/*}/
+    ssh -i ~/.ssh/id_rsa mihir@$node "chmod +x $SCRIPT_PATH"
+done
 
 # 3. Generate hostfile using the Python script
 # Pass all arguments given to this script directly to the python script
