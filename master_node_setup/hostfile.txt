@@ -1,2 +1,1 @@
-LAPTOP-PTR322VG gpu_slots=1 gpu_type=NVIDIA cpu_slots=12
 LAPTOP-PTR322VG slots=1,12 # NVIDIA

@@ -21,6 +21,32 @@ def get_argument_parser():
              "'Qwen/Qwen-7B', 'google/gemma-7b'"
     )
 
+    # Inference Arguments
+    parser.add_argument(
+        "--input_text",
+        type=str,
+        default=None,
+        help="Text input for generation (use either this or --input_file)"
+    )
+    parser.add_argument(
+        "--input_file",
+        type=str,
+        default=None,
+        help="Path to text file with inputs (one per line)"
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=100,
+        help="Maximum number of tokens to generate"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.7,
+        help="Temperature for generation"
+    )
+
     # Data Arguments (Placeholders - replace with your actual data loading)
     parser.add_argument(
         "--dataset_path",
@@ -71,7 +97,7 @@ def load_model_and_tokenizer(model_name_or_path, local_rank):
 
         # Load model - DeepSpeed handles device placement later
         model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
+            args.model_name_or_path,
             config=config,
             trust_remote_code=True
             # Note: Avoid device_map='auto' here; DeepSpeed manages placement.
@@ -109,6 +135,9 @@ def main():
     # DeepSpeed requires the local_rank argument
     print(f"Initializing DeepSpeed on local rank: {args.local_rank}")
     deepspeed.init_distributed()
+    
+    # Check if we're doing inference
+    is_inference = not any([args.num_epochs > 0, args.max_steps > 0])
 
     # Ensure local_rank is correctly set for subsequent operations
     local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank)) # Get rank from env if available
@@ -139,32 +168,65 @@ def main():
     # train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=...) # DeepSpeed handles batch size
 
     # Initialize DeepSpeed Engine
-    # DeepSpeed's initialize function wraps the model, creates the optimizer/scheduler based on config
     print(f"[Rank {local_rank}] Initializing DeepSpeed engine...")
-    model_engine, optimizer, train_loader, lr_scheduler = deepspeed.initialize(
-        args=args,                  # Pass command line args (like deepspeed_config)
-        model=model,
-        model_parameters=model.parameters(), # Pass parameters for optimizer creation
-        training_data=train_dataset # Pass dataset for DataLoader creation
-        # config_params=args.deepspeed_config # Alternative way to pass config path
-    )
+    if is_inference:
+        # For inference, we don't need optimizer or training data
+        model_engine = deepspeed.init_inference(
+            model=model,
+            config=args.deepspeed_config
+        )
+    else:
+        # For training, use the full initialize function
+        model_engine, optimizer, train_loader, lr_scheduler = deepspeed.initialize(
+            args=args,
+            model=model,
+            model_parameters=model.parameters(),
+            training_data=train_dataset
+        )
     print(f"[Rank {local_rank}] DeepSpeed engine initialized.")
     print(f"[Rank {local_rank}] Effective Batch Size per GPU: {model_engine.train_micro_batch_size_per_gpu()}")
     print(f"[Rank {local_rank}] Gradient Accumulation Steps: {model_engine.gradient_accumulation_steps()}")
 
-    # --- Training Loop ---
-    print(f"[Rank {local_rank}] Starting training loop...")
-    global_step = 0
-    start_time = time.time()
+    # --- Training/Inference Loop ---
+    if is_inference:
+        print(f"[Rank {local_rank}] Starting inference...")
+        # Dynamic input handling
+        inputs = []
+        if args.input_text:
+            inputs = [args.input_text]
+        elif args.input_file:
+            with open(args.input_file, 'r') as f:
+                inputs = [line.strip() for line in f if line.strip()]
+        else:
+            raise ValueError("Must provide either --input_text or --input_file for inference")
 
-    for epoch in range(args.num_epochs):
-        print(f"[Rank {local_rank}] Starting Epoch {epoch+1}/{args.num_epochs}")
-        model_engine.train() # Set model to training mode
+        # Batch generation
+        for i, input_text in enumerate(inputs):
+            inputs = tokenizer(input_text, return_tensors="pt").to(model_engine.local_rank)
+            outputs = model_engine.generate(
+                **inputs,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                pad_token_id=tokenizer.eos_token_id
+            )
+            if local_rank == 0:
+                print(f"\nInput ({i+1}/{len(inputs)}): {input_text}")
+                print("Generated output:")
+                print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+                print("-"*50)
+    else:
+        print(f"[Rank {local_rank}] Starting training loop...")
+        global_step = 0
+        start_time = time.time()
 
-        for step, batch in enumerate(train_loader):
-            # Move batch to the correct device
-            # Input IDs and Attention Mask are typical outputs from tokenizer
-            input_ids = batch[0].to(model_engine.local_rank)
+        for epoch in range(args.num_epochs):
+            print(f"[Rank {local_rank}] Starting Epoch {epoch+1}/{args.num_epochs}")
+            model_engine.train() # Set model to training mode
+
+            for step, batch in enumerate(train_loader):
+                # Move batch to the correct device
+                # Input IDs and Attention Mask are typical outputs from tokenizer
+                input_ids = batch[0].to(model_engine.local_rank)
             attention_mask = batch[1].to(model_engine.local_rank)
             # Labels are often input_ids shifted for Causal LM tasks
             labels = input_ids.clone()
@@ -196,9 +258,13 @@ def main():
                 break # Exit inner loop
 
         if args.max_steps > 0 and global_step >= args.max_steps:
-            break # Exit outer loop
+            print(f"[Rank {local_rank}] Reached max_steps ({args.max_steps}). Stopping training.")
+             # Exit inner loop
 
-        print(f"[Rank {local_rank}] Finished Epoch {epoch+1}")
+    if args.max_steps > 0 and global_step >= args.max_steps:
+        break # Exit outer loop
+
+    print(f"[Rank {local_rank}] Finished Epoch {epoch+1}")
 
         # --- Optional: Saving Checkpoints ---
         # DeepSpeed handles saving model, optimizer, and scheduler states
